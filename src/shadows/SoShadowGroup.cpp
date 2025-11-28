@@ -172,7 +172,19 @@
 /*!
   \var SoSFBool SoShadowGroup::shadowCachingEnabled
 
-  Not used yet. Provided for TGS Inventor compatibility.
+  When enabled (TRUE, the default), shadow maps are cached and reused
+  when the light position/direction and scene geometry have not changed.
+  This significantly improves performance for static scenes or scenes
+  where only the camera moves (not the lights or shadow-casting geometry).
+
+  For spot lights, the shadow map is reused when the light's position,
+  direction, and cutoff angle remain unchanged.
+
+  For directional lights, the shadow map is recalculated when the camera
+  moves because the shadow frustum depends on the view frustum.
+
+  Set to FALSE to force shadow map regeneration every frame (useful for
+  debugging or when automatic change detection doesn't work correctly).
 */
 
 /*!
@@ -388,6 +400,8 @@ public:
     this->vsm_nearval = NULL;
     this->gaussmap = NULL;
     this->texunit = -1;
+    this->depthMapValid = FALSE;
+    this->cachedCameraMatrix = SbMatrix::identity();
     this->bboxnode = new SoSeparator;
     this->bboxnode->ref();
 
@@ -589,6 +603,10 @@ public:
   int texunit;
   int lightid;
 
+  // Shadow map caching state
+  SbBool depthMapValid;
+  SbMatrix cachedCameraMatrix;  // cached camera view/projection matrix for comparison
+
   SoSeparator * bboxnode;
   SoShaderProgram * vsm_program;
   SoShaderParameter1i * shadowmapid;
@@ -698,6 +716,12 @@ public:
       delete this->shadowlights[i];
     }
     this->shadowlights.truncate(0);
+  }
+
+  void invalidateDepthMaps(void) {
+    for (int i = 0; i < this->shadowlights.getLength(); i++) {
+      this->shadowlights[i]->depthMapValid = FALSE;
+    }
   }
 
   static bool supported(const cc_glglue * glctx, SbString& reason);
@@ -891,6 +915,9 @@ SoShadowGroup::notify(SoNotList * nl)
   SoNotRec * rec = nl->getLastRec();
   if (rec->getBase() != this) {
     // was not notified through a field, subgraph was changed
+
+    // Invalidate shadow map caches when scene geometry changes
+    PRIVATE(this)->invalidateDepthMaps();
 
     rec = nl->getFirstRecAtNode();
     if (rec) {
@@ -1338,8 +1365,24 @@ void
 SoShadowGroupP::renderDepthMap(SoShadowLightCache * cache,
                                SoGLRenderAction * action)
 {
+  // Check if we can use the cached shadow map
+  SbBool cachingEnabled = PUBLIC(this)->shadowCachingEnabled.getValue();
+
+  if (cachingEnabled && cache->depthMapValid) {
+    // Check if the light camera matrix has changed significantly
+    if (cache->matrix == cache->cachedCameraMatrix) {
+      // Shadow map is still valid, skip re-rendering
+      return;
+    }
+  }
+
+  // Render the shadow map
   cache->depthmap->GLRender(action);
   if (cache->gaussmap) cache->gaussmap->GLRender(action);
+
+  // Update cache state
+  cache->cachedCameraMatrix = cache->matrix;
+  cache->depthMapValid = TRUE;
 }
 
 namespace {
